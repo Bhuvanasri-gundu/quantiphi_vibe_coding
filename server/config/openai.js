@@ -8,7 +8,8 @@ if (!apiKey) {
   );
 }
 
-const openai = apiKey ? new OpenAI({ apiKey }) : null;
+// Set maxRetries to 0 so quota errors or invalid keys fall back to Gemini immediately without 15s retry delays
+const openai = apiKey ? new OpenAI({ apiKey, maxRetries: 0 }) : null;
 
 /**
  * Returns the configured OpenAI model name.

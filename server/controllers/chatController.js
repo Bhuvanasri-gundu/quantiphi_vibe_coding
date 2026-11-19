@@ -16,8 +16,10 @@ const VALID_TONES = ['professional', 'casual', 'concise'];
 export const sendMessage = async (req, res, next) => {
   let clientDisconnected = false;
 
-  req.on('close', () => {
-    clientDisconnected = true;
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      clientDisconnected = true;
+    }
   });
 
   try {
@@ -125,8 +127,10 @@ export const sendMessage = async (req, res, next) => {
 export const regenerateResponse = async (req, res, next) => {
   let clientDisconnected = false;
 
-  req.on('close', () => {
-    clientDisconnected = true;
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      clientDisconnected = true;
+    }
   });
 
   try {

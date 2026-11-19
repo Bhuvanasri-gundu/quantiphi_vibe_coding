@@ -1,5 +1,5 @@
 import openai, { getModel } from '../config/openai.js';
-import { getGeminiClient, getGeminiModel } from '../config/gemini.js';
+import { getGeminiApiKey, getGeminiModel } from '../config/gemini.js';
 
 /**
  * Tone-specific system instructions that shape the AI's response style.
@@ -25,11 +25,11 @@ export function getSystemMessage(tone) {
 }
 
 /**
- * Stream completion using Google Gemini SDK.
+ * Stream completion using Google Gemini REST SSE API.
  */
 async function* streamFromGemini(messages, tone) {
-  const gemini = getGeminiClient();
-  if (!gemini) {
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) {
     throw Object.assign(
       new Error('Gemini API key is not configured. Set GEMINI_API_KEY in your .env file.'),
       { statusCode: 503 }
@@ -49,7 +49,6 @@ async function* streamFromGemini(messages, tone) {
     parts: [{ text: msg.content }],
   }));
 
-  // If there are no user messages, at least provide an initial prompt
   if (contents.length === 0) {
     contents.push({
       role: 'user',
@@ -57,17 +56,57 @@ async function* streamFromGemini(messages, tone) {
     });
   }
 
-  const responseStream = await gemini.models.generateContentStream({
-    model: modelName,
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse&key=${apiKey}`;
+
+  const requestBody = {
     contents,
-    config: {
-      systemInstruction: systemMessage.content,
+    systemInstruction: {
+      parts: [{ text: systemMessage.content }],
     },
+  };
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(requestBody),
   });
 
-  for await (const chunk of responseStream) {
-    if (chunk.text) {
-      yield chunk.text;
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error?.message || `Gemini API returned status ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('data:')) {
+        const jsonStr = trimmed.slice(5).trim();
+        try {
+          const parsed = JSON.parse(jsonStr);
+          const candidates = parsed.candidates || [];
+          for (const cand of candidates) {
+            const parts = cand.content?.parts || [];
+            for (const part of parts) {
+              if (part.text) {
+                yield part.text;
+              }
+            }
+          }
+        } catch {
+          // Ignore incomplete chunk parse
+        }
+      }
     }
   }
 }
@@ -111,13 +150,9 @@ async function* streamFromOpenAI(messages, tone) {
 /**
  * Async generator that streams chat completion chunks.
  * Attempts OpenAI first; seamlessly falls back to Google Gemini if OpenAI encounters quota/auth/network errors or is unconfigured.
- *
- * @param {Array} messages - Array of { role, content } message objects from conversation history.
- * @param {string} tone - The desired response tone.
- * @yields {string} Content delta from each streamed chunk.
  */
 export async function* streamChatCompletion(messages, tone) {
-  const gemini = getGeminiClient();
+  const geminiKey = getGeminiApiKey();
 
   // If OpenAI is configured, attempt OpenAI first
   if (openai && process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.startsWith('sk-')) {
@@ -129,25 +164,24 @@ export async function* streamChatCompletion(messages, tone) {
       }
       if (yieldedAny) return;
     } catch (openAiError) {
-      console.warn(`⚠️  OpenAI stream failed (${openAiError.message}). Checking Gemini fallback...`);
+      console.warn(`⚠️  OpenAI stream failed (${openAiError.message}). Falling back to Google Gemini...`);
 
       // If Gemini is available, fall back to it immediately
-      if (gemini) {
-        console.log(`🔄 Seamlessly falling back to Google Gemini (${getGeminiModel()})...`);
+      if (geminiKey) {
+        console.log(`🔄 Seamlessly streaming from Google Gemini (${getGeminiModel()})...`);
         for await (const chunk of streamFromGemini(messages, tone)) {
           yield chunk;
         }
         return;
       }
 
-      // If Gemini is not configured, rethrow OpenAI error with helpful instructions
       throw openAiError;
     }
   }
 
-  // If OpenAI is not configured or didn't yield, use Gemini directly
-  if (gemini) {
-    console.log(`🤖 Generating response using Google Gemini (${getGeminiModel()})...`);
+  // If OpenAI is not configured, stream with Gemini directly
+  if (geminiKey) {
+    console.log(`🤖 Streaming response using Google Gemini (${getGeminiModel()})...`);
     for await (const chunk of streamFromGemini(messages, tone)) {
       yield chunk;
     }
